@@ -1,7 +1,7 @@
 """Shared student reporting / raster IO for WaTEM 5.0.3. Pilot parameters, not calibration."""
 from pathlib import Path
 import numpy as np, pandas as pd, rasterio, matplotlib.pyplot as plt
-import configparser, re, shutil, json, subprocess
+import configparser, re, shutil, json, subprocess, zipfile, hashlib, uuid
 from rasterio.shutil import copy as rio_copy
 def read_ini(path):
     c=configparser.ConfigParser(interpolation=None); c.read(path); return c
@@ -27,7 +27,7 @@ def native_write(path,a,p):
 def report(folder,mode,rain_mm=None):
     folder=Path(folder); inp=folder/'modelinput'; out=folder/'modeloutput'; result=folder/'report'; result.mkdir(exist_ok=True)
     cfg=read_ini(inp/'inifile.ini'); prc,p=read_raster(raster_path(cfg,inp,'Parcel filename')); mask=prc!=0; res=abs(p['transform'].a); area=mask.sum()*res**2/10000
-    t=(out/'Total sediment.txt').read_text()
+    t=(out/'Total sediment.txt').read_text()+'\n'+(folder/'model.log').read_text()
     vals=[float(re.search(k+r'\s*([-+\d.]+)',t).group(1)) for k in ['Total erosion:','Total deposition:','Sediment leaving the catchment, via the river:','Sediment leaving the catchment, not via the river:']]
     e,d,river,other=-vals[0]/1000,vals[1]/1000,vals[2]/1000,vals[3]/1000
     row=dict(mode=mode,area_ha=area,erosion_t=e,deposition_t=d,river_t=river,other_export_t=other,export_t=river+other,erosion_t_ha=e/area,river_t_ha=river/area,delivery_ratio_pct=100*(river+other)/max(e,1e-12),mass_residual_t=e-d-river-other,mass_pass=abs(e-d-river-other)<=max(.0001,.02*e))
@@ -74,3 +74,26 @@ def clone_run(source,dest,binary,rain_mm=None):
 def execute(dest,binary):
     dest=Path(dest); p=subprocess.run([str(binary),str(dest/'modelinput/inifile.ini')],capture_output=True,text=True,errors='replace',cwd=dest)
     (dest/'model.log').write_text(p.stdout+'\n'+p.stderr); p.check_returncode()
+    assert (dest/'modeloutput'/'Total sediment.txt').exists(), (dest/'model.log').read_text()[-4000:]
+
+def safe_extract(archive,dest):
+    dest=Path(dest); dest.mkdir(parents=True,exist_ok=True)
+    with zipfile.ZipFile(archive) as z:
+        for f in z.infolist():
+            p=Path(f.filename)
+            assert not p.is_absolute() and '..' not in p.parts and '\\' not in f.filename,'Unsafe ZIP path'
+        z.extractall(dest)
+    return dest
+def identify_package(root,kind):
+    hits=[]
+    for p in Path(root).rglob('complete.json'):
+        m=json.loads(p.read_text())
+        if m.get('kind')==kind: hits.append((p.parent,m))
+    assert len(hits)==1,f'Expected exactly one {kind} package; found {len(hits)}'
+    return hits[0]
+def baseline_digest(folder):
+    h=hashlib.sha256()
+    for p in sorted(Path(folder).glob('*/modelinput/*')):
+        if not p.is_file() or p.suffix.lower() in ['.ini','.xml']: continue
+        h.update(str(p.relative_to(folder)).encode()); h.update(p.read_bytes())
+    return h.hexdigest()
